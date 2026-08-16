@@ -143,57 +143,98 @@ class SimulatedAnnealingTSPN:
 
 
 
+    def _compute_tangent_headings(self, indices, phi_angles, radii, centers, start_node_idx):
+        """
+        計算全域平滑切線航向角：
+        無人機通過每個觀測點時的航向向量直接設定為 (下一點 - 當前點) 與 (當前點 - 前一點) 的平均切線向量，
+        確保航向角與飛行軌跡永遠完全順向對齊，100% 杜絕 270~360 度的 Dubins 水滴自轉迴旋圈。
+        """
+        n_points = len(centers)
+        pts = np.zeros((n_points, 2))
+        for idx in range(n_points):
+            if idx == start_node_idx:
+                pts[idx] = centers[idx]
+            else:
+                pts[idx] = centers[idx] + radii[idx] * np.array([np.cos(phi_angles[idx]), np.sin(phi_angles[idx])])
+        
+        headings = np.zeros(n_points)
+        n_route = len(indices)
+        for pos in range(n_route):
+            curr_node = indices[pos]
+            prev_node = indices[(pos - 1) % n_route]
+            next_node = indices[(pos + 1) % n_route]
+            
+            v_in = pts[curr_node] - pts[prev_node]
+            n_in = np.linalg.norm(v_in)
+            if n_in > 1e-6: v_in /= n_in
+            
+            v_out = pts[next_node] - pts[curr_node]
+            n_out = np.linalg.norm(v_out)
+            if n_out > 1e-6: v_out /= n_out
+            
+            v_tangent = v_in + v_out
+            if np.linalg.norm(v_tangent) < 1e-3:
+                v_tangent = v_out
+            else:
+                v_tangent /= np.linalg.norm(v_tangent)
+                
+            headings[curr_node] = np.arctan2(v_tangent[1], v_tangent[0])
+            
+        return headings
+
+    def _initialize_smooth_configuration(self, indices, centers, start_node_idx):
+        """
+        智慧幾何外切初始化：
+        將所有敵艦的觀測點預設放置在遠離相鄰點與中心的外緣切線上，給予充足轉彎緩衝區。
+        """
+        n_points = len(centers)
+        phi_angles = np.zeros(n_points)
+        radii = np.ones(n_points) * self.obs_max_radius
+        centroid = np.mean(centers, axis=0)
+        
+        n_route = len(indices)
+        for pos in range(n_route):
+            target_idx = indices[pos]
+            if target_idx == start_node_idx:
+                continue
+            prev_idx = indices[(pos - 1) % n_route]
+            next_idx = indices[(pos + 1) % n_route]
+            
+            vec_to_centroid = centers[target_idx] - centroid
+            vec_prev = centers[target_idx] - centers[prev_idx]
+            vec_next = centers[next_idx] - centers[target_idx]
+            
+            tangent = vec_next / (np.linalg.norm(vec_next) + 1e-6) + vec_prev / (np.linalg.norm(vec_prev) + 1e-6)
+            if np.linalg.norm(tangent) < 1e-3:
+                out_normal = vec_to_centroid
+            else:
+                out_normal = np.array([-tangent[1], tangent[0]])
+                if np.dot(out_normal, vec_to_centroid) < 0:
+                    out_normal = -out_normal
+                    
+            if np.linalg.norm(out_normal) > 1e-3:
+                phi_angles[target_idx] = np.arctan2(out_normal[1], out_normal[0])
+            else:
+                phi_angles[target_idx] = np.arctan2(vec_to_centroid[1], vec_to_centroid[0])
+                
+        headings = self._compute_tangent_headings(indices, phi_angles, radii, centers, start_node_idx)
+        return headings, phi_angles, radii
+
     def optimize(self, route, centers, start_node_idx):
         """
-        執行 DTSPN 優化。
-        :param route: 初始 Route 物件
-        :param centers: 目標中心座標 (N, 2)
-        :param start_node_idx: 起點索引
-        :return: (最佳 Route, 最佳 x-y-heading 點位矩陣, 最佳 phi_angles, 最佳 radii)
+        執行平滑化 DTSPN 優化 (結合切線流與防碰撞)。
         """
         n_points = len(centers)
         current_indices = list(route.indices)
         
-        # 確保起點排在第一位
         if current_indices[0] != start_node_idx:
             s_pos = current_indices.index(start_node_idx)
             current_indices = current_indices[s_pos:] + current_indices[:s_pos]
             
-        # 1. 智慧初始化變數
-        current_headings = np.zeros(n_points)
-        current_phi_angles = np.zeros(n_points)
-        current_radii = np.ones(n_points) * self.obs_max_radius  # 預設都在最外圈 9km 以利避障
-        
-        n_route = len(current_indices)
-        for pos in range(n_route):
-            target_idx = current_indices[pos]
-            if target_idx == start_node_idx:
-                continue
-            prev_idx = current_indices[(pos - 1) % n_route]
-            next_idx = current_indices[(pos + 1) % n_route]
-            
-            # 拜訪點指向前一點與後一點的平分線方向，減少折返
-            vec_prev = centers[prev_idx] - centers[target_idx]
-            vec_next = centers[next_idx] - centers[target_idx]
-            dir_vec = vec_prev / np.linalg.norm(vec_prev) + vec_next / np.linalg.norm(vec_next)
-            if np.linalg.norm(dir_vec) < 1e-3:
-                dir_vec = vec_next
-            
-            angle = np.arctan2(dir_vec[1], dir_vec[0])
-            current_phi_angles[target_idx] = angle
-            
-            # 預設航向指向下一個目標的預估拜訪點
-            r_next = self.obs_max_radius if next_idx != start_node_idx else 0.0
-            next_est_pos = centers[next_idx] + r_next * np.array([np.cos(current_phi_angles[next_idx]), np.sin(current_phi_angles[next_idx])])
-            curr_pos = centers[target_idx] + self.obs_max_radius * np.array([np.cos(angle), np.sin(angle)])
-            vec_to_next = next_est_pos - curr_pos
-            current_headings[target_idx] = np.arctan2(vec_to_next[1], vec_to_next[0])
-
-        # 起點航向指向第二個點
-        next_idx = current_indices[1]
-        next_est_pos = centers[next_idx] + self.obs_max_radius * np.array([np.cos(current_phi_angles[next_idx]), np.sin(current_phi_angles[next_idx])])
-        vec_to_next = next_est_pos - centers[start_node_idx]
-        current_headings[start_node_idx] = np.arctan2(vec_to_next[1], vec_to_next[0])
+        # 1. 智慧外切與平滑切線初始化
+        current_headings, current_phi_angles, current_radii = self._initialize_smooth_configuration(
+            current_indices, centers, start_node_idx
+        )
 
         current_cost, current_col = self._get_combined_cost_and_collisions(
             current_indices, current_headings, current_phi_angles, current_radii, centers, start_node_idx
@@ -210,70 +251,41 @@ class SimulatedAnnealingTSPN:
         temp = self._estimate_initial_temperature(
             current_indices, current_headings, current_phi_angles, current_radii, centers, start_node_idx
         )
-        temp = max(temp, 100.0)  # 保證有足夠溫度
-        print(f"DTSPN 適應性初始溫度: {temp:.4f}，初始碰撞次數: {current_col}")
+        temp = max(temp, 100.0)
+        print(f"DTSPN 平滑化初始溫度: {temp:.4f}，初始碰撞次數: {current_col}")
+
+        n_route = len(current_indices)
 
         # 模擬退火主迴圈
         for step in range(self.max_iter):
             t_curr = temp * (self.cooling_rate ** step)
             
             new_indices = list(current_indices)
-            new_headings = np.array(current_headings)
             new_phi_angles = np.array(current_phi_angles)
             new_radii = np.array(current_radii)
             
             r_val = random.random()
-            if r_val < 0.15:
-                # 1. 2-opt 順序改變 (保持起點在 index 0)
+            if r_val < 0.20:
+                # 1. 2-opt 順序改變
                 if n_route >= 4:
                     idx1, idx2 = random.sample(range(1, n_route), 2)
                     if idx1 > idx2: idx1, idx2 = idx2, idx1
                     new_indices = current_indices[:idx1] + current_indices[idx1:idx2+1][::-1] + current_indices[idx2+1:]
-            elif r_val < 0.35:
-                # 2. 航向角擾動
-                target_idx = random.randint(0, n_points - 1)
-                new_headings[target_idx] += np.random.normal(0, np.radians(15))
-                new_headings[target_idx] %= (2 * np.pi)
-            elif r_val < 0.55:
-                # 3. 甜甜圈觀測角 phi 擾動
+            elif r_val < 0.60:
+                # 2. 甜甜圈觀測角 phi 擾動 (在相鄰連線外側微調)
                 target_idx = random.randint(0, n_points - 1)
                 if target_idx != start_node_idx:
-                    new_phi_angles[target_idx] += np.random.normal(0, np.radians(20))
+                    new_phi_angles[target_idx] += np.random.normal(0, np.radians(15))
                     new_phi_angles[target_idx] %= (2 * np.pi)
-            elif r_val < 0.75:
-                # 4. 甜甜圈觀測半徑 r 擾動
+            else:
+                # 3. 甜甜圈半徑 r 擾動
                 target_idx = random.randint(0, n_points - 1)
                 if target_idx != start_node_idx:
-                    new_radii[target_idx] += np.random.normal(0, 0.5)
+                    new_radii[target_idx] += np.random.normal(0, 0.4)
                     new_radii[target_idx] = np.clip(new_radii[target_idx], self.obs_min_radius, self.obs_max_radius)
-            else:
-                # 5. 智慧航向與角度對齊
-                target_pos = random.randint(0, n_route - 1)
-                target_node = new_indices[target_pos]
-                
-                # 計算目前所有拜訪點座標
-                pts = np.zeros((n_points, 2))
-                for idx in range(n_points):
-                    if idx == start_node_idx:
-                        pts[idx] = centers[idx]
-                    else:
-                        pts[idx] = centers[idx] + new_radii[idx] * np.array([np.cos(new_phi_angles[idx]), np.sin(new_phi_angles[idx])])
-                
-                prev_node = new_indices[(target_pos - 1) % n_route]
-                next_node = new_indices[(target_pos + 1) % n_route]
-                
-                if random.random() < 0.5:
-                    # 航向對齊：指向下一點
-                    vec = pts[next_node] - pts[target_node]
-                    new_headings[target_node] = np.arctan2(vec[1], vec[0])
-                else:
-                    # 拜訪點角度對齊：指向前後兩點向量的平分線方向
-                    if target_node != start_node_idx:
-                        vec_prev = pts[prev_node] - centers[target_node]
-                        vec_next = pts[next_node] - centers[target_node]
-                        dir_vec = vec_prev / np.linalg.norm(vec_prev) + vec_next / np.linalg.norm(vec_next)
-                        if np.linalg.norm(dir_vec) > 1e-3:
-                            new_phi_angles[target_node] = np.arctan2(dir_vec[1], dir_vec[0])
+
+            # 強制維持平滑切線航向 (消除水滴圈的核心保障)
+            new_headings = self._compute_tangent_headings(new_indices, new_phi_angles, new_radii, centers, start_node_idx)
 
             new_cost, new_col = self._get_combined_cost_and_collisions(
                 new_indices, new_headings, new_phi_angles, new_radii, centers, start_node_idx
@@ -296,6 +308,27 @@ class SimulatedAnnealingTSPN:
                     best_cost = current_cost
                     best_col = current_col
 
+        # 4. 後處理切線局部精細化 (Fine-tuning Smoothing Pass)
+        for _ in range(3):
+            for target_idx in range(n_points):
+                if target_idx == start_node_idx:
+                    continue
+                orig_phi = best_phi_angles[target_idx]
+                orig_r = best_radii[target_idx]
+                for d_phi in [-0.15, -0.05, 0.05, 0.15]:
+                    test_phi = (orig_phi + d_phi) % (2 * np.pi)
+                    trial_phi = np.array(best_phi_angles)
+                    trial_phi[target_idx] = test_phi
+                    trial_h = self._compute_tangent_headings(best_indices, trial_phi, best_radii, centers, start_node_idx)
+                    cost_val, col_val = self._get_combined_cost_and_collisions(
+                        best_indices, trial_h, trial_phi, best_radii, centers, start_node_idx
+                    )
+                    if cost_val < best_cost:
+                        best_cost = cost_val
+                        best_col = col_val
+                        best_phi_angles = trial_phi
+                        best_headings = trial_h
+
         # 重建最佳航路下的拜訪點座標矩陣 (N, 3: x, y, heading)
         optimized_points = np.zeros((n_points, 3))
         for i in range(n_points):
@@ -307,5 +340,5 @@ class SimulatedAnnealingTSPN:
                 optimized_points[i, 1] = centers[i, 1] + best_radii[i] * np.sin(best_phi_angles[i])
             optimized_points[i, 2] = best_headings[i]
             
-        print(f"DTSPN 優化完成。最優成本(含懲罰): {best_cost:.2f}，碰撞次數: {best_col}")
+        print(f"DTSPN 平滑優化完成。最優成本(含懲罰): {best_cost:.2f}，碰撞次數: {best_col}")
         return Route(best_indices), optimized_points, best_phi_angles, best_radii
