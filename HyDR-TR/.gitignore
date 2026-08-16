@@ -1,0 +1,3 @@
+# ignore directory __pycache__ and log
+__pycache__/
+log/

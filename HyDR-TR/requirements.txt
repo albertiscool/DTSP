@@ -1,0 +1,20 @@
+# Python 3.8.10
+# PyTorch 1.9.0+cu111
+# CUDA 11.1
+# cuDNN 8.0.5
+
+torch==1.9.0+cu111
+
+torch-geometric==1.7.2
+torch-scatter==2.0.6
+torch-sparse==0.6.9
+torch-cluster==1.5.9
+torch-spline-conv==1.2.1
+
+numpy
+PyYAML
+tqdm
+scikit-learn
+matplotlib
+tensorboard
+ortools

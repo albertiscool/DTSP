@@ -1,0 +1,48 @@
+AA-GLKH Cost Correlation Analysis Summary Report
+==================================================
+
+Experimental Setup:
+- Node counts: [10, 15, 20, 25, 30, 35, 40, 45]
+- Turning radii: [0.05, 0.1, 0.2]
+- Instances per case: 64
+- Total experiments: 1536
+- Successful experiments: 1536
+- Processing time: 2665.18 seconds
+- Parallel workers: 8
+
+Overall Cost Correlation Results:
+- Pearson correlation: r = 0.9830, p = 0.0000e+00
+- Spearman correlation: ρ = 0.9767, p = 0.0000e+00
+
+Error Metrics:
+- Mean Absolute Error (MAE): 5.7806
+- Root Mean Square Error (RMSE): 7.7488
+- Mean Relative Error: 0.6493 (64.93%)
+- Median Relative Error: 0.6430 (64.30%)
+
+Cost Ratio Statistics (AA/GLKH):
+- Mean ratio: 1.6491
+- Median ratio: 1.6430
+- Std ratio: 0.3534
+- Min ratio: 0.8866
+- Max ratio: 2.5391
+
+Timing Comparison:
+- AA mean time: 0.0240s
+- GLKH mean time: 13.7460s
+- Speed ratio (GLKH/AA): 572.6x
+
+Spearman Correlation by Node Count:
+- 10 nodes: ρ = 0.893, p = 0.000, n = 192
+- 15 nodes: ρ = 0.917, p = 0.000, n = 192
+- 20 nodes: ρ = 0.914, p = 0.000, n = 192
+- 25 nodes: ρ = 0.915, p = 0.000, n = 192
+- 30 nodes: ρ = 0.900, p = 0.000, n = 192
+- 35 nodes: ρ = 0.896, p = 0.000, n = 192
+- 40 nodes: ρ = 0.909, p = 0.000, n = 192
+- 45 nodes: ρ = 0.901, p = 0.000, n = 192
+
+Spearman Correlation by Turning Radius:
+- R = 0.05: ρ = 0.973, p = 0.000, n = 512
+- R = 0.1: ρ = 0.971, p = 0.000, n = 512
+- R = 0.2: ρ = 0.977, p = 0.000, n = 512

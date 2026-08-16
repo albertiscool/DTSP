@@ -1,0 +1,39 @@
+agent_configs:
+- agent_num: 3
+  models:
+    GIN-GLKH:
+      path: a3_n10to50_c10_ortools_seed1_exp250915_GIN_GLKH.pth
+      type: GIN-GLKH
+    HyDR-TR:
+      path: a3_n10to50_c10_ortools_seed1_exp250913_HyDR_TR.pth
+      type: HyDR-TR
+- agent_num: 4
+  models:
+    GIN-GLKH:
+      path: a4_n10to50_c10_ortools_seed1_exp250915_GIN_Origin.pth
+      type: GIN-GLKH
+    HyDR-TR:
+      path: a4_n10to50_c10_ortools_seed1_exp250913_HyDR_TR.pth
+      type: HyDR-TR
+- agent_num: 5
+  models:
+    GIN-GLKH:
+      path: a5_n10to50_c10_ortools_seed1_exp250916_GIN_GLKH.pth
+      type: GIN-GLKH
+    HyDR-TR:
+      path: a5_n10to50_c10_ortools_seed1_exp250913_HyDR_TR.pth
+      type: HyDR-TR
+curvature:
+- 10
+nodes:
+- 25
+- 50
+- 100
+test_date: 20260527
+test_data_num: 100
+test_heading_num: 8
+test_routing_alg: glkh
+test_worker: 8
+random_seed: 77
+test_algorithms: ['KM-GLKH', 'GIN-GLKH', 'HyDR-TR']
+test_rl_device: cuda
