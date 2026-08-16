@@ -497,7 +497,7 @@ class Version3_TangentSmoothing(DTSPNSolverBase):
 
 def draw_single_panel(ax, centers, indices, points, start_node_idx, title, sub_title, cost_calculator):
     ax.set_facecolor('white')
-    ax.set_title(f"{title}\n{sub_title}", fontsize=11, fontweight='bold', pad=8, color='#0f172a')
+    ax.set_title(f"{title}\n{sub_title}", fontsize=11, fontweight='bold', pad=12, color='#0f172a')
     ax.set_xlabel("East (km)", fontsize=9, fontweight='bold')
     ax.set_ylabel("North (km)", fontsize=9, fontweight='bold')
     ax.grid(True, linestyle='--', color='#cbd5e1', alpha=0.5)
@@ -631,33 +631,35 @@ def run_benchmark():
     cost_calc = DubinsCost(2.0)
     
     # --- 圖 1: Stage 0 對比圖 ---
-    fig_0, axes_0 = plt.subplots(1, 3, figsize=(20, 6.8), dpi=200)
-    fig_0.suptitle("DTSP Algorithm Benchmark: Stage 0 (25 Static Targets)", fontsize=15, fontweight='bold', y=0.98)
+    fig_0, axes_0 = plt.subplots(1, 3, figsize=(22, 7.5), dpi=200)
+    fig_0.suptitle("DTSP Algorithm Benchmark: Stage 0 (25 Static Targets)", fontsize=16, fontweight='bold', y=0.98)
     
     draw_single_panel(axes_0[0], static_centers, v1_idx_0, v1_pts_0, start_node_idx, 
-                      "Version 1: Baseline (Senior)", f"Length: {v1_len_0:.2f} km | Collisions: {v1_col_0}", cost_calc)
+                      "Version 1: Baseline (Senior)", f"Length: {v1_len_0:.2f} km  |  Collisions: {v1_col_0}", cost_calc)
     draw_single_panel(axes_0[1], static_centers, v2_idx_0, v2_pts_0, start_node_idx, 
-                      "Version 2: 2-Opt & Penalty", f"Length: {v2_len_0:.2f} km | Collisions: {v2_col_0}", cost_calc)
+                      "Version 2: 2-Opt & Penalty", f"Length: {v2_len_0:.2f} km  |  Collisions: {v2_col_0}", cost_calc)
     draw_single_panel(axes_0[2], static_centers, v3_idx_0, v3_pts_0, start_node_idx, 
-                      "Version 3: Tangent Smoothing (Ours)", f"Length: {v3_len_0:.2f} km | Collisions: {v3_col_0}", cost_calc)
+                      "Version 3: Tangent Smoothing (Ours)", f"Length: {v3_len_0:.2f} km  |  Collisions: {v3_col_0}", cost_calc)
     
-    plt.tight_layout()
+    plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.90])
+    plt.subplots_adjust(top=0.85, wspace=0.18)
     fig_0.savefig("comparison_stage_0.png", bbox_inches='tight', facecolor='white')
     plt.close(fig_0)
     print("[SUCCESS] Saved Stage 0 comparison: comparison_stage_0.png")
     
     # --- 圖 2: Stage 5 對比圖 ---
-    fig_5, axes_5 = plt.subplots(1, 3, figsize=(20, 6.8), dpi=200)
-    fig_5.suptitle("DTSP Algorithm Benchmark: Stage 5 (30 Total Targets)", fontsize=15, fontweight='bold', y=0.98)
+    fig_5, axes_5 = plt.subplots(1, 3, figsize=(22, 7.5), dpi=200)
+    fig_5.suptitle("DTSP Algorithm Benchmark: Stage 5 (30 Total Targets)", fontsize=16, fontweight='bold', y=0.98)
     
     draw_single_panel(axes_5[0], v1_centers, v1_idx_5, v1_pts_5, start_node_idx, 
-                      "Version 1: Baseline (Senior)", f"Length: {v1_len_5:.2f} km | Collisions: {v1_col_5}", cost_calc)
+                      "Version 1: Baseline (Senior)", f"Length: {v1_len_5:.2f} km  |  Collisions: {v1_col_5}", cost_calc)
     draw_single_panel(axes_5[1], v2_centers, v2_idx_5, v2_pts_5, start_node_idx, 
-                      "Version 2: 2-Opt & Penalty", f"Length: {v2_len_5:.2f} km | Collisions: {v2_col_5}", cost_calc)
+                      "Version 2: 2-Opt & Penalty", f"Length: {v2_len_5:.2f} km  |  Collisions: {v2_col_5}", cost_calc)
     draw_single_panel(axes_5[2], v3_centers, v3_idx_5, v3_pts_5, start_node_idx, 
-                      "Version 3: Tangent Smoothing (Ours)", f"Length: {v3_len_5:.2f} km | Collisions: {v3_col_5}", cost_calc)
+                      "Version 3: Tangent Smoothing (Ours)", f"Length: {v3_len_5:.2f} km  |  Collisions: {v3_col_5}", cost_calc)
     
-    plt.tight_layout()
+    plt.tight_layout(rect=[0.02, 0.02, 0.98, 0.90])
+    plt.subplots_adjust(top=0.85, wspace=0.18)
     fig_5.savefig("comparison_stage_5.png", bbox_inches='tight', facecolor='white')
     plt.close(fig_5)
     print("[SUCCESS] Saved Stage 5 comparison: comparison_stage_5.png")
