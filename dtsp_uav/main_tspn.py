@@ -62,6 +62,24 @@ def insert_new_center(route_indices, new_center_idx, centers):
             
     updated_indices = list(route_indices)
     updated_indices.insert(best_pos, new_center_idx)
+    
+    # 動態插入後執行快速 2-opt 消除交叉
+    improved = True
+    n = len(updated_indices)
+    while improved:
+        improved = False
+        for i in range(1, n - 1):
+            for j in range(i + 1, n):
+                a, b = updated_indices[i - 1], updated_indices[i]
+                c, d = updated_indices[j], updated_indices[(j + 1) % n]
+                d0 = np.linalg.norm(centers[a] - centers[b]) + np.linalg.norm(centers[c] - centers[d])
+                d1 = np.linalg.norm(centers[a] - centers[c]) + np.linalg.norm(centers[b] - centers[d])
+                if d1 < d0 - 1e-4:
+                    updated_indices[i:j + 1] = updated_indices[i:j + 1][::-1]
+                    improved = True
+                    break
+            if improved:
+                break
     return updated_indices
 
 def main():

@@ -43,8 +43,8 @@ class SimulatedAnnealingTSPN:
         num_collisions = 0
         n_route = len(indices)
         
-        penalty_base = 2000.0   # 每次碰撞的基本懲罰
-        penalty_slope = 3000.0  # 每侵入 1 km 額外增加的懲罰
+        penalty_base = 50000.0   # 每次碰撞的基本超重額懲罰 (強制不可碰撞)
+        penalty_slope = 50000.0  # 每侵入 1 km 額外增加的超重額懲罰
         collision_cost = 0.0
         
         for i in range(n_route):
@@ -59,10 +59,10 @@ class SimulatedAnnealingTSPN:
             if mode is None:
                 dist = np.linalg.norm(p1[:2] - p2[:2])
                 length = dist
-                px = np.linspace(p1[0], p2[0], 20)
-                py = np.linspace(p1[1], p2[1], 20)
+                px = np.linspace(p1[0], p2[0], 25)
+                py = np.linspace(p1[1], p2[1], 25)
             else:
-                px, py = self.cost_calculator._interpolate(p1, t, p, q, mode, step_size=2.0)
+                px, py = self.cost_calculator._interpolate(p1, t, p, q, mode, step_size=1.0)
             
             total_len += length
             
