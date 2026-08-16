@@ -7,6 +7,37 @@ from core.routing import Route
 from algorithms.simulated_annealing_tspn import SimulatedAnnealingTSPN
 from simulation.animator_tspn import AnimatorTSPN
 
+def build_initial_euclidean_tour(centers, start_idx):
+    """使用貪婪最近鄰 (Nearest Neighbor) + 2-opt 構建無自交的歐氏初始閉環"""
+    unvisited = set(range(len(centers)))
+    unvisited.remove(start_idx)
+    tour = [start_idx]
+    curr = start_idx
+    while unvisited:
+        next_node = min(unvisited, key=lambda idx: np.linalg.norm(centers[curr] - centers[idx]))
+        tour.append(next_node)
+        unvisited.remove(next_node)
+        curr = next_node
+    
+    # 執行快速 2-opt 解開歐氏交叉線
+    improved = True
+    n = len(tour)
+    while improved:
+        improved = False
+        for i in range(1, n - 1):
+            for j in range(i + 1, n):
+                a, b = tour[i - 1], tour[i]
+                c, d = tour[j], tour[(j + 1) % n]
+                d0 = np.linalg.norm(centers[a] - centers[b]) + np.linalg.norm(centers[c] - centers[d])
+                d1 = np.linalg.norm(centers[a] - centers[c]) + np.linalg.norm(centers[b] - centers[d])
+                if d1 < d0 - 1e-4:
+                    tour[i:j + 1] = tour[i:j + 1][::-1]
+                    improved = True
+                    break
+            if improved:
+                break
+    return tour
+
 def insert_new_center(route_indices, new_center_idx, centers):
     """
     使用最便宜插入啟發式 (Cheapest Insertion) 將新敵艦中心插入到現有路徑中。
@@ -64,10 +95,8 @@ def main():
     start_node_idx = env.get_start_node_index()
     print(f"UAV 起飛基地索引: {start_node_idx}，位置: {centers[start_node_idx]}")
 
-    # 建立初始閉環順序
-    initial_indices = list(range(len(centers)))
-    initial_indices.remove(start_node_idx)
-    route_indices = [start_node_idx] + initial_indices
+    # 建立高品質初始歐氏閉環順序 (消除初始交叉)
+    route_indices = build_initial_euclidean_tour(centers, start_node_idx)
     route = Route(route_indices)
 
     # 2. 初始路徑優化 (DTSPN + 避障)
