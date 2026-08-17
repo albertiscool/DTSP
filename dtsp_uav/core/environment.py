@@ -4,7 +4,7 @@ class Environment:
     def __init__(self, x_range=(50, 150), y_range=(0, 100), n_static=25):
         self.x_range = x_range
         self.y_range = y_range
-        self.cruise_speed = 120.0  # km/h
+        self.cruise_speed = 130.0  # km/h (依蔡老師規定設定為 130 km/h)
         self.targets = self._generate_targets(n_static)
         self.dynamic_targets = []
         self.clusters = self._generate_clusters(n_static)  # 新增群信息
