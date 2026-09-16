@@ -62,7 +62,7 @@ DROPOUT        = 0.1
 
 # 訓練超參數
 BATCH_SIZE     = 256             # RTX 4090 可穩定跑 256（也可試 512）
-N_EPOCHS       = 100             # 總訓練 Epoch 數
+N_EPOCHS       = 50             # 總訓練 Epoch 數
 LR             = 1e-4            # 學習率
 LR_DECAY       = 0.99            # 每個 Epoch 學習率衰減係數
 CLIP_GRAD      = 1.0             # 梯度裁剪
@@ -78,6 +78,7 @@ FILTER_K       = 10              # 每次只讓注意力考慮最具潛力的 K 
 # 儲存路徑
 SAVE_DIR       = "transformer_checkpoints"
 os.makedirs(SAVE_DIR, exist_ok=True)
+best_model_path = "transformer_checkpoints/strict_model.pt"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,22 +154,35 @@ class DTSPEnvironment:
 
     def _compute_obstacle_penalty(self, coords, ordered):
         """
-        向量化障礙物懲罰：對每段航線中點，檢查是否侵入 5km 禁航區。
+        精確計算「線段」與「圓形 (5km禁區)」的最短距離，若侵入則給予極大懲罰。
         """
         B, N, _ = coords.shape
-        penalty_weight = 5.0
-
+        penalty_weight = 500.0  # 提高精確懲罰權重
+        
         next_ordered = torch.roll(ordered, -1, dims=1)
-        midpoints = (ordered + next_ordered) / 2.0             # [B, N, 2]
-
-        # 中點到所有敵艦的距離 [B, N_seg, N_obs]
-        mid_exp = midpoints.unsqueeze(2).expand(-1, -1, N, -1)
-        obs_exp = coords.unsqueeze(1).expand(-1, N, -1, -1)
-        dists = (mid_exp - obs_exp).norm(dim=-1)               # [B, N, N]
-
-        obs_r_norm = OBSTACLE_R / 100.0
-        violation  = F.relu(obs_r_norm - dists)                # [B, N, N]
-        penalty    = violation.sum(dim=-1) * penalty_weight    # [B, N]
+        
+        # 線段端點 A, B 與所有障礙物 C
+        A = ordered.unsqueeze(2).expand(-1, -1, N, -1)     # [B, N_seg, N_obs, 2]
+        B_pts = next_ordered.unsqueeze(2).expand(-1, -1, N, -1)
+        C = coords.unsqueeze(1).expand(-1, N, -1, -1)
+        
+        V = B_pts - A
+        W = C - A
+        
+        # 投影求最近點
+        c1 = (W * V).sum(dim=-1)
+        c2 = (V * V).sum(dim=-1) + 1e-8
+        t = torch.clamp(c1 / c2, 0.0, 1.0)
+        
+        closest_pts = A + t.unsqueeze(-1) * V
+        dists = (C - closest_pts).norm(dim=-1)  # [B, N_seg, N_obs]
+        
+        # OBSTACLE_R 是 5.0km，但因無人機轉彎半徑，加上緩衝區
+        obs_r_norm = (OBSTACLE_R + 0.1) / 100.0  
+        violation = F.relu(obs_r_norm - dists)  # > 0 則代表有侵入
+        
+        # 計算懲罰
+        penalty = violation.sum(dim=-1) * penalty_weight
         return penalty
 
 
