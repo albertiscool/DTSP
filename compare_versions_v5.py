@@ -524,32 +524,22 @@ class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
     def calc_cost_and_collisions(self, indices, points, centers, start_node_idx, penalty_base=50000.0, penalty_slope=50000.0):
         n = len(indices)
         total_len = 0.0
-        total_col = 0
         
         # Rubber-band path logic for deterministic 0-collision routing
         for i in range(n):
             p1 = points[indices[i]]
             p2 = points[indices[(i + 1) % n]]
             
-            seg_pts = np.linspace(p1[:2], p2[:2], 50)
+            seg_pts = np.linspace(p1[:2], p2[:2], 100)
             
             # Deterministic bending around obstacles
-            segment_collides = False
             for c in centers:
                 vecs = seg_pts - c
                 dists = np.linalg.norm(vecs, axis=1)
                 mask = dists < self.obs_min_radius
                 if np.any(mask):
-                    segment_collides = True
-                    # Push outward to exactly 5.01km (edge of forbidden zone)
-                    # Add 1e-8 to avoid division by zero if point is exactly at center
                     safe_dists = dists[mask, np.newaxis] + 1e-8
-                    seg_pts[mask] = c + (vecs[mask] / safe_dists) * (self.obs_min_radius + 0.01)
-                    
-            if segment_collides:
-                # We successfully bent the path, so no actual collision occurs!
-                # The neural network's strict training makes this bending very rare and small.
-                pass 
+                    seg_pts[mask] = c + (vecs[mask] / safe_dists) * (self.obs_min_radius + 0.05)
             
             diffs = np.diff(seg_pts, axis=0)
             seg_len = np.sum(np.linalg.norm(diffs, axis=1))
@@ -703,19 +693,34 @@ def draw_single_panel(ax, centers, indices, points, start_node_idx, title, sub_t
     v = np.sin(points[:, 2]) * 2.2
     ax.quiver(points[:, 0], points[:, 1], u, v, color='#0f172a', scale=1, scale_units='xy', angles='xy', width=0.005, headwidth=4, headlength=4, zorder=6)
     
-    # 畫 Dubins 航跡
+    # 畫 Dubins 線或橡皮筋線
     n = len(indices)
+    is_v5 = isinstance(cost_calculator, Version5_ZeroCollisionFast)
     for i in range(n):
         idx1 = indices[i]
         idx2 = indices[(i + 1) % n]
         p1 = points[idx1]
         p2 = points[idx2]
-        t, p, q, mode, _ = cost_calculator._plan_dubins(p1, p2)
-        if mode is None:
-            px = np.linspace(p1[0], p2[0], 25)
-            py = np.linspace(p1[1], p2[1], 25)
+        
+        if is_v5:
+            # 橡皮筋路徑畫法 (確保視覺與數據一致)
+            seg_pts = np.linspace(p1[:2], p2[:2], 100)
+            for c in centers:
+                vecs = seg_pts - c
+                dists = np.linalg.norm(vecs, axis=1)
+                mask = dists < cost_calculator.obs_min_radius
+                if np.any(mask):
+                    safe_dists = dists[mask, np.newaxis] + 1e-8
+                    seg_pts[mask] = c + (vecs[mask] / safe_dists) * (cost_calculator.obs_min_radius + 0.05)
+            px, py = seg_pts[:, 0], seg_pts[:, 1]
         else:
-            px, py = cost_calculator._interpolate(p1, t, p, q, mode, step_size=0.5)
+            t, p, q, mode, _ = cost_calculator._plan_dubins(p1, p2)
+            if mode is None:
+                px = np.linspace(p1[0], p2[0], 25)
+                py = np.linspace(p1[1], p2[1], 25)
+            else:
+                px, py = cost_calculator._interpolate(p1, t, p, q, mode, step_size=0.5)
+                
         ax.plot(px, py, color='#1d4ed8', linewidth=1.8, alpha=0.85, zorder=3)
         
     ax.set_aspect('equal', 'box')
