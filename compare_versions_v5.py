@@ -495,11 +495,12 @@ class Version3_TangentSmoothing(DTSPNSolverBase):
 
 
 # -----------------------------------------------------------------------------
-# 版本 5: Transformer V5 (Strict) + Fast Router
+# 版本 5: Transformer V5 + 2-Opt + True Physical 0-Collision Optimizer
 # -----------------------------------------------------------------------------
 class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
-    def __init__(self, model_path="transformer_checkpoints/best_model.pt", turning_radius=2.0, obs_min=5.0, obs_max=9.0):
+    def __init__(self, model_path="transformer_checkpoints/best_model.pt", turning_radius=2.0, obs_min=6.2, obs_max=9.0):
         super().__init__(turning_radius, obs_min, obs_max)
+        self.obstacle_radius = 5.20
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Load model definition
@@ -516,76 +517,103 @@ class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
                 self.policy.load_state_dict(ckpt['policy'])
                 self.policy.eval()
             else:
-                print(f"[WARN] V4 Model not found at {model_path}!")
+                print(f"[WARN] V5 Model not found at {model_path}!")
         except Exception as e:
-            print(f"[ERROR] Failed to load V4 Model: {e}")
+            print(f"[ERROR] Failed to load V5 Model: {e}")
             self.policy = None
 
-    def calc_cost_and_collisions(self, indices, points, centers, start_node_idx, penalty_base=50000.0, penalty_slope=50000.0):
-        n = len(indices)
+    def calc_cost_and_collisions(self, indices, points, centers, start_node_idx, penalty_base=200000.0, penalty_slope=200000.0):
         total_len = 0.0
+        num_collisions = 0
+        collision_cost = 0.0
+        n_route = len(indices)
+        n_points = len(centers)
+        safe_r = self.obstacle_radius
         
-        # Rubber-band path logic for deterministic 0-collision routing
-        for i in range(n):
-            p1 = points[indices[i]]
-            p2 = points[indices[(i + 1) % n]]
+        for i in range(n_route):
+            u = indices[i]
+            v = indices[(i + 1) % n_route]
+            p1 = points[u]
+            p2 = points[v]
             
-            seg_pts = np.linspace(p1[:2], p2[:2], 100)
+            t, p, q, mode, length = self.cost_calculator._plan_dubins(p1, p2)
+            if mode is None:
+                px = np.linspace(p1[0], p2[0], 25)
+                py = np.linspace(p1[1], p2[1], 25)
+                length = np.linalg.norm(p1[:2] - p2[:2])
+            else:
+                px, py = self.cost_calculator._interpolate(p1, t, p, q, mode, step_size=0.6)
+            total_len += length
             
-            # Deterministic bending around obstacles
-            for c in centers:
-                vecs = seg_pts - c
-                dists = np.linalg.norm(vecs, axis=1)
-                mask = dists < self.obs_min_radius
-                if np.any(mask):
-                    safe_dists = dists[mask, np.newaxis] + 1e-8
-                    seg_pts[mask] = c + (vecs[mask] / safe_dists) * (self.obs_min_radius + 0.05)
-            
-            diffs = np.diff(seg_pts, axis=0)
-            seg_len = np.sum(np.linalg.norm(diffs, axis=1))
-            total_len += seg_len
-            
-        return total_len, 0.0, 0
+            for o_idx in range(n_points):
+                if o_idx == start_node_idx: continue
+                d = np.sqrt((px - centers[o_idx, 0])**2 + (py - centers[o_idx, 1])**2)
+                min_d = np.min(d)
+                if min_d < safe_r:
+                    num_collisions += 1
+                    collision_cost += penalty_base + penalty_slope * (safe_r - min_d)
+                    
+        return total_len, collision_cost, num_collisions
 
-    def solve(self, centers, start_node_idx, max_iter=100, cooling_rate=0.996):
-        n = len(centers)
-        
-        # --- 1. 使用 Transformer 推論初始 Sequence ---
-        if self.policy is not None:
-            coords = np.zeros((n, 2), dtype=np.float32)
-            coords[:, 0] = (centers[:, 0] - 50.0) / 100.0
-            coords[:, 1] = (centers[:, 1] - 0.0) / 100.0
-            obs_radii = np.ones(n, dtype=np.float32) * (self.obs_max_radius / 100.0)
-            obs_radii[start_node_idx] = 0.0
-            
-            coords_t = torch.tensor(coords, device=self.device).unsqueeze(0)
-            obs_radii_t = torch.tensor(obs_radii, device=self.device).unsqueeze(0)
-            
-            with torch.no_grad():
-                tours, _ = self.policy(coords_t, obs_radii_t, greedy=True, start_city=start_node_idx)
-                indices = tours[0].cpu().numpy().tolist()
+    def check_segment_collision(self, p1, p2, centers, start_node_idx, safe_r=5.05):
+        t, p, q, mode, length = self.cost_calculator._plan_dubins(p1, p2)
+        if mode is None:
+            px = np.linspace(p1[0], p2[0], 30)
+            py = np.linspace(p1[1], p2[1], 30)
+            length = np.linalg.norm(p1[:2] - p2[:2])
         else:
-            indices = build_2opt_euclidean_tour(centers, start_node_idx)
+            px, py = self.cost_calculator._interpolate(p1, t, p, q, mode, step_size=0.15)
+        for o_idx, c in enumerate(centers):
+            if o_idx == start_node_idx: continue
+            d = np.sqrt((px - c[0])**2 + (py - c[1])**2)
+            if np.min(d) < safe_r:
+                return True, length, np.min(d)
+        return False, length, np.min(d)
+
+    def solve(self, centers, start_node_idx, max_iter=2500, cooling_rate=0.996):
+        n = len(centers)
+        coords = np.zeros((n, 2), dtype=np.float32)
+        coords[:, 0] = (centers[:, 0] - 50.0) / 100.0
+        coords[:, 1] = (centers[:, 1] - 0.0) / 100.0
+        obs_radii = np.ones(n, dtype=np.float32) * (self.obs_max_radius / 100.0)
+        obs_radii[start_node_idx] = 0.0
+        coords_t = torch.tensor(coords, device=self.device).unsqueeze(0)
+        obs_radii_t = torch.tensor(obs_radii, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            tours, _ = self.policy(coords_t, obs_radii_t, greedy=True, start_city=start_node_idx)
+            indices = tours[0].cpu().numpy().tolist()
             
-        # --- 2. 使用 SA 優化 Heading, Phi, Radius (鎖定 indices 不做大幅更動) ---
+        def tour_len(idx):
+            pts = centers[idx]
+            return np.sum(np.linalg.norm(np.diff(np.vstack([pts, pts[0]]), axis=0), axis=1))
+        improved = True
+        while improved:
+            improved = False
+            for i in range(1, n - 1):
+                for j in range(i + 1, n):
+                    new_idx = indices[:i] + indices[i:j+1][::-1] + indices[j+1:]
+                    if tour_len(new_idx) < tour_len(indices) - 1e-4:
+                        indices = new_idx
+                        improved = True
+                        break
+                if improved: break
+                
         phi_angles = np.zeros(n)
-        radii = np.ones(n) * self.obs_max_radius
+        radii = np.ones(n) * 7.5
         centroid = np.mean(centers, axis=0)
-        
         for pos in range(n):
             target_idx = indices[pos]
             if target_idx == start_node_idx: continue
             prev_idx = indices[(pos - 1) % n]
             next_idx = indices[(pos + 1) % n]
-            vec_to_c = centers[target_idx] - centroid
             vec_prev = centers[target_idx] - centers[prev_idx]
             vec_next = centers[next_idx] - centers[target_idx]
             tangent = vec_next / (np.linalg.norm(vec_next) + 1e-6) + vec_prev / (np.linalg.norm(vec_prev) + 1e-6)
-            if np.linalg.norm(tangent) < 1e-3: out_n = vec_to_c
+            if np.linalg.norm(tangent) < 1e-3: out_n = centers[target_idx] - centroid
             else:
                 out_n = np.array([-tangent[1], tangent[0]])
-                if np.dot(out_n, vec_to_c) < 0: out_n = -out_n
-            phi_angles[target_idx] = np.arctan2(out_n[1], out_n[0]) if np.linalg.norm(out_n) > 1e-3 else np.arctan2(vec_to_c[1], vec_to_c[0])
+                if np.dot(out_n, centers[target_idx] - centroid) < 0: out_n = -out_n
+            phi_angles[target_idx] = np.arctan2(out_n[1], out_n[0])
             
         headings = self.compute_tangents(indices, phi_angles, radii, centers, start_node_idx)
         
@@ -600,31 +628,27 @@ class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
             return pts
             
         curr_pts = get_points(headings, phi_angles, radii)
-        t_len, c_cost, c_col = self.calc_cost_and_collisions(indices, curr_pts, centers, start_node_idx, penalty_base=50000.0, penalty_slope=50000.0)
+        t_len, c_cost, c_col = self.calc_cost_and_collisions(indices, curr_pts, centers, start_node_idx, penalty_base=200000.0, penalty_slope=200000.0)
         curr_cost = t_len + c_cost
-        
         best_indices = list(indices)
         best_h, best_p, best_r = np.array(headings), np.array(phi_angles), np.array(radii)
         best_cost = curr_cost
-        best_len, best_col = t_len, c_col
         
         temp = 200.0
-        # SA 微調 (只做 500 次，發揮 Transformer 速度優勢)
         for step in range(max_iter):
             t_curr = temp * (cooling_rate ** step)
             new_idx = list(indices)
             new_p, new_r = np.array(phi_angles), np.array(radii)
             
             r_val = random.random()
-            # 降低 sequence 變更機率，因為 transformer 已經很準了
-            if r_val < 0.02 and n >= 4:
+            if r_val < 0.15 and n >= 4:
                 idx1, idx2 = random.sample(range(1, n), 2)
                 if idx1 > idx2: idx1, idx2 = idx2, idx1
                 new_idx = indices[:idx1] + indices[idx1:idx2+1][::-1] + indices[idx2+1:]
-            elif r_val < 0.60:
+            elif r_val < 0.70:
                 t_i = random.randint(0, n - 1)
                 if t_i != start_node_idx:
-                    new_p[t_i] = (new_p[t_i] + np.random.normal(0, np.radians(15))) % (2 * np.pi)
+                    new_p[t_i] = (new_p[t_i] + np.random.normal(0, np.radians(20))) % (2 * np.pi)
             else:
                 t_i = random.randint(0, n - 1)
                 if t_i != start_node_idx:
@@ -632,7 +656,7 @@ class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
                     
             new_h = self.compute_tangents(new_idx, new_p, new_r, centers, start_node_idx)
             trial_pts = get_points(new_h, new_p, new_r)
-            t_len, c_cost, c_col = self.calc_cost_and_collisions(new_idx, trial_pts, centers, start_node_idx, penalty_base=50000.0, penalty_slope=50000.0)
+            t_len, c_cost, c_col = self.calc_cost_and_collisions(new_idx, trial_pts, centers, start_node_idx, penalty_base=200000.0, penalty_slope=200000.0)
             trial_cost = t_len + c_cost
             
             delta = trial_cost - curr_cost
@@ -643,26 +667,57 @@ class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
                     best_indices = list(indices)
                     best_h, best_p, best_r = np.array(headings), np.array(phi_angles), np.array(radii)
                     best_cost = curr_cost
-                    best_len, best_col = t_len, c_col
                     
-        # 局部切線精細化
-        for _ in range(2):
-            for t_i in range(n):
-                if t_i == start_node_idx: continue
-                orig_p = best_p[t_i]
-                for d_phi in [-0.1, 0.1]:
-                    test_p = np.array(best_p)
-                    test_p[t_i] = (orig_p + d_phi) % (2 * np.pi)
-                    test_h = self.compute_tangents(best_indices, test_p, best_r, centers, start_node_idx)
-                    test_pts = get_points(test_h, test_p, best_r)
-                    t_len, c_cost, c_col = self.calc_cost_and_collisions(best_indices, test_pts, centers, start_node_idx, penalty_base=50000.0, penalty_slope=50000.0)
-                    if t_len + c_cost < best_cost:
-                        best_cost = t_len + c_cost
-                        best_p = test_p
-                        best_h = test_h
-                        
         final_pts = get_points(best_h, best_p, best_r)
-        final_len, _, final_col = self.calc_cost_and_collisions(best_indices, final_pts, centers, start_node_idx)
+        
+        # 3. DETERMINISTIC COLLISION ERASER
+        for pass_round in range(5):
+            has_col = False
+            for i in range(n):
+                u = best_indices[i]
+                v = best_indices[(i + 1) % n]
+                hit, _, _ = self.check_segment_collision(final_pts[u], final_pts[v], centers, start_node_idx, safe_r=5.05)
+                if hit:
+                    has_col = True
+                    for fix_target in [v, u]:
+                        if fix_target == start_node_idx: continue
+                        pos = best_indices.index(fix_target)
+                        prev_n = best_indices[(pos - 1) % n]
+                        next_n = best_indices[(pos + 1) % n]
+                        c = centers[fix_target]
+                        
+                        best_candidate = None
+                        best_cand_len = 1e9
+                        
+                        for phi in np.linspace(0, 2*np.pi, 36, endpoint=False):
+                            for r in [6.5, 7.5, 8.5]:
+                                cand_xy = c + r * np.array([np.cos(phi), np.sin(phi)])
+                                for sign in [1.0, -1.0]:
+                                    tang = np.array([-np.sin(phi), np.cos(phi)]) * sign
+                                    h = np.arctan2(tang[1], tang[0])
+                                    cand_p = np.array([cand_xy[0], cand_xy[1], h])
+                                    
+                                    hit_in, l_in, _ = self.check_segment_collision(final_pts[prev_n], cand_p, centers, start_node_idx, safe_r=5.05)
+                                    hit_out, l_out, _ = self.check_segment_collision(cand_p, final_pts[next_n], centers, start_node_idx, safe_r=5.05)
+                                    
+                                    if not hit_in and not hit_out:
+                                        if l_in + l_out < best_cand_len:
+                                            best_cand_len = l_in + l_out
+                                            best_candidate = cand_p
+                        if best_candidate is not None:
+                            final_pts[fix_target] = best_candidate
+                            break
+            if not has_col: break
+            
+        final_len = 0.0
+        final_col = 0
+        for i in range(n):
+            u = best_indices[i]
+            v = best_indices[(i + 1) % n]
+            hit, l, min_d = self.check_segment_collision(final_pts[u], final_pts[v], centers, start_node_idx, safe_r=5.0)
+            final_len += l
+            if hit: final_col += 1
+                
         return best_indices, final_pts, final_len, final_col
 
 # =============================================================================
@@ -693,34 +748,21 @@ def draw_single_panel(ax, centers, indices, points, start_node_idx, title, sub_t
     v = np.sin(points[:, 2]) * 2.2
     ax.quiver(points[:, 0], points[:, 1], u, v, color='#0f172a', scale=1, scale_units='xy', angles='xy', width=0.005, headwidth=4, headlength=4, zorder=6)
     
-    # 畫 Dubins 線或橡皮筋線
+    # 畫真實 Dubins 曲線
     n = len(indices)
-    is_v5 = isinstance(cost_calculator, Version5_ZeroCollisionFast)
     for i in range(n):
         idx1 = indices[i]
         idx2 = indices[(i + 1) % n]
         p1 = points[idx1]
         p2 = points[idx2]
         
-        if is_v5:
-            # 橡皮筋路徑畫法 (確保視覺與數據一致)
-            seg_pts = np.linspace(p1[:2], p2[:2], 100)
-            for c in centers:
-                vecs = seg_pts - c
-                dists = np.linalg.norm(vecs, axis=1)
-                mask = dists < cost_calculator.obs_min_radius
-                if np.any(mask):
-                    safe_dists = dists[mask, np.newaxis] + 1e-8
-                    seg_pts[mask] = c + (vecs[mask] / safe_dists) * (cost_calculator.obs_min_radius + 0.05)
-            px, py = seg_pts[:, 0], seg_pts[:, 1]
+        t, p, q, mode, _ = cost_calculator._plan_dubins(p1, p2)
+        if mode is None:
+            px = np.linspace(p1[0], p2[0], 25)
+            py = np.linspace(p1[1], p2[1], 25)
         else:
-            t, p, q, mode, _ = cost_calculator._plan_dubins(p1, p2)
-            if mode is None:
-                px = np.linspace(p1[0], p2[0], 25)
-                py = np.linspace(p1[1], p2[1], 25)
-            else:
-                px, py = cost_calculator._interpolate(p1, t, p, q, mode, step_size=0.5)
-                
+            px, py = cost_calculator._interpolate(p1, t, p, q, mode, step_size=0.15)
+            
         ax.plot(px, py, color='#1d4ed8', linewidth=1.8, alpha=0.85, zorder=3)
         
     ax.set_aspect('equal', 'box')
@@ -789,11 +831,13 @@ def run_benchmark():
     v3_time_0 = time.time() - t0
     print(f" [V3 切線平滑+外切流線]       航程: {v3_len_0:.2f} km | 碰撞: {v3_col_0} 次 | 耗時: {v3_time_0:.2f}s")
 
-    # V4
+    # V5
+    random.seed(FIXED_SEED)
+    np.random.seed(FIXED_SEED)
     t0 = time.time()
     v5_idx_0, v5_pts_0, v5_len_0, v5_col_0 = v5_solver.solve(static_centers, start_node_idx)
     v5_time_0 = time.time() - t0
-    print(f" [V4 Transformer+SA 物理微調]       航程: {v5_len_0:.2f} km | 碰撞: {v5_col_0} 次 | 耗時: {v5_time_0:.2f}s")
+    print(f" [V5 Transformer 嚴格零碰撞]       航程: {v5_len_0:.2f} km | 碰撞: {v5_col_0} 次 | 耗時: {v5_time_0:.2f}s")
 
     
     # -------------------------------------------------------------------------
@@ -822,15 +866,17 @@ def run_benchmark():
     v3_idx_5, v3_pts_5, v3_len_5, v3_col_5 = v3_solver.solve(v3_centers, start_node_idx)
     print(f" [V3 切線平滑+外切流線 - Stage 5]       航程: {v3_len_5:.2f} km | 碰撞: {v3_col_5} 次")
 
-    # V4 動態重規劃
+    # V5 動態重規劃
     v5_centers = np.copy(static_centers)
     for dyn_tgt in dynamic_targets:
         v5_centers = np.vstack([v5_centers, dyn_tgt])
     
+    random.seed(FIXED_SEED)
+    np.random.seed(FIXED_SEED)
     t0 = time.time()
     v5_idx_5, v5_pts_5, v5_len_5, v5_col_5 = v5_solver.solve(v5_centers, start_node_idx)
     v5_time_5 = time.time() - t0
-    print(f" [V4 Transformer+SA 物理微調 - Stage 5]  航程: {v5_len_5:.2f} km | 碰撞: {v5_col_5} 次 | 耗時: {v5_time_5:.2f}s")
+    print(f" [V5 Transformer 嚴格零碰撞 - Stage 5]  航程: {v5_len_5:.2f} km | 碰撞: {v5_col_5} 次 | 耗時: {v5_time_5:.2f}s")
 
 
     # =========================================================================
@@ -883,7 +929,7 @@ def run_benchmark():
 
     # --- 圖 3: 數據量化綜合評估圖 (長條圖) ---
     fig_bar, ax_bar = plt.subplots(1, 2, figsize=(14, 5), dpi=200)
-    versions = ['V1 Baseline\n(Senior)', 'V2 2-Opt &\nPenalty', 'V3 Tangent\nSmoothing', 'V5 NN Strict\n+ Router']
+    versions = ['V1 Baseline\n(Senior)', 'V2 2-Opt &\nPenalty', 'V3 Tangent\nSmoothing', 'V5 NN Strict\n(0-Collision)']
     
     # 航程對比
     stage0_lens = [v1_len_0, v2_len_0, v3_len_0, v5_len_0]
