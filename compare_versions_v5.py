@@ -500,7 +500,7 @@ class Version3_TangentSmoothing(DTSPNSolverBase):
 class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
     def __init__(self, model_path="transformer_checkpoints/best_model.pt", turning_radius=2.0, obs_min=6.2, obs_max=9.0):
         super().__init__(turning_radius, obs_min, obs_max)
-        self.obstacle_radius = 5.20
+        self.obstacle_radius = 5.15
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Load model definition
@@ -570,7 +570,47 @@ class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
                 return True, length, np.min(d)
         return False, length, np.min(d)
 
-    def solve(self, centers, start_node_idx, max_iter=2500, cooling_rate=0.996):
+    def build_obstacle_aware_tour(self, init_indices, centers, start_node_idx):
+        n = len(centers)
+        cost_matrix = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                if i == j: continue
+                d_euc = np.linalg.norm(centers[i] - centers[j])
+                p1 = centers[i]
+                p2 = centers[j]
+                seg = p2 - p1
+                l2 = np.dot(seg, seg)
+                penetration = False
+                for o in range(n):
+                    if o == i or o == j or o == start_node_idx: continue
+                    co = centers[o]
+                    t = np.clip(np.dot(co - p1, seg) / (l2 + 1e-9), 0.0, 1.0)
+                    proj = p1 + t * seg
+                    # Safety corridor 6.50 km
+                    if np.linalg.norm(co - proj) < 6.50:
+                        penetration = True
+                        break
+                cost_matrix[i, j] = d_euc + (200000.0 if penetration else 0.0)
+
+        tour = list(init_indices)
+        def eval_tour(t):
+            return sum(cost_matrix[t[k], t[(k + 1) % n]] for k in range(n))
+
+        improved = True
+        while improved:
+            improved = False
+            for i in range(1, n - 1):
+                for j in range(i + 1, n):
+                    new_t = tour[:i] + tour[i:j+1][::-1] + tour[j+1:]
+                    if eval_tour(new_t) < eval_tour(tour) - 1e-4:
+                        tour = new_t
+                        improved = True
+                        break
+                if improved: break
+        return tour
+
+    def solve(self, centers, start_node_idx, max_iter=600, cooling_rate=0.995):
         n = len(centers)
         coords = np.zeros((n, 2), dtype=np.float32)
         coords[:, 0] = (centers[:, 0] - 50.0) / 100.0
@@ -579,41 +619,43 @@ class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
         obs_radii[start_node_idx] = 0.0
         coords_t = torch.tensor(coords, device=self.device).unsqueeze(0)
         obs_radii_t = torch.tensor(obs_radii, device=self.device).unsqueeze(0)
+        
+        # 1. Transformer Policy Tour
         with torch.no_grad():
             tours, _ = self.policy(coords_t, obs_radii_t, greedy=True, start_city=start_node_idx)
-            indices = tours[0].cpu().numpy().tolist()
+            raw_indices = tours[0].cpu().numpy().tolist()
             
-        def tour_len(idx):
-            pts = centers[idx]
-            return np.sum(np.linalg.norm(np.diff(np.vstack([pts, pts[0]]), axis=0), axis=1))
-        improved = True
-        while improved:
-            improved = False
-            for i in range(1, n - 1):
-                for j in range(i + 1, n):
-                    new_idx = indices[:i] + indices[i:j+1][::-1] + indices[j+1:]
-                    if tour_len(new_idx) < tour_len(indices) - 1e-4:
-                        indices = new_idx
-                        improved = True
-                        break
-                if improved: break
+        # 2. Obstacle-Aware 2-Opt Untangling
+        indices = self.build_obstacle_aware_tour(raw_indices, centers, start_node_idx)
                 
+        # 3. Cluster-Aware Outward Initial Placement
         phi_angles = np.zeros(n)
         radii = np.ones(n) * 7.5
         centroid = np.mean(centers, axis=0)
+        
         for pos in range(n):
             target_idx = indices[pos]
             if target_idx == start_node_idx: continue
-            prev_idx = indices[(pos - 1) % n]
-            next_idx = indices[(pos + 1) % n]
-            vec_prev = centers[target_idx] - centers[prev_idx]
-            vec_next = centers[next_idx] - centers[target_idx]
-            tangent = vec_next / (np.linalg.norm(vec_next) + 1e-6) + vec_prev / (np.linalg.norm(vec_prev) + 1e-6)
-            if np.linalg.norm(tangent) < 1e-3: out_n = centers[target_idx] - centroid
+            close_nbs = [j for j in range(n) if j != target_idx and j != start_node_idx and np.linalg.norm(centers[target_idx] - centers[j]) < 7.5]
+            if close_nbs:
+                vec_away = np.zeros(2)
+                for nb in close_nbs:
+                    diff = centers[target_idx] - centers[nb]
+                    vec_away += diff / (np.linalg.norm(diff) + 1e-6)
+                phi_angles[target_idx] = np.arctan2(vec_away[1], vec_away[0])
+                radii[target_idx] = 8.0
             else:
-                out_n = np.array([-tangent[1], tangent[0]])
-                if np.dot(out_n, centers[target_idx] - centroid) < 0: out_n = -out_n
-            phi_angles[target_idx] = np.arctan2(out_n[1], out_n[0])
+                prev_idx = indices[(pos - 1) % n]
+                next_idx = indices[(pos + 1) % n]
+                vec_prev = centers[target_idx] - centers[prev_idx]
+                vec_next = centers[next_idx] - centers[target_idx]
+                tangent = vec_next / (np.linalg.norm(vec_next) + 1e-6) + vec_prev / (np.linalg.norm(vec_prev) + 1e-6)
+                if np.linalg.norm(tangent) < 1e-3: out_n = centers[target_idx] - centroid
+                else:
+                    out_n = np.array([-tangent[1], tangent[0]])
+                    if np.dot(out_n, centers[target_idx] - centroid) < 0: out_n = -out_n
+                phi_angles[target_idx] = np.arctan2(out_n[1], out_n[0])
+                radii[target_idx] = 7.5
             
         headings = self.compute_tangents(indices, phi_angles, radii, centers, start_node_idx)
         
@@ -628,57 +670,56 @@ class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
             return pts
             
         curr_pts = get_points(headings, phi_angles, radii)
-        t_len, c_cost, c_col = self.calc_cost_and_collisions(indices, curr_pts, centers, start_node_idx, penalty_base=200000.0, penalty_slope=200000.0)
+        t_len, c_cost, c_col = self.calc_cost_and_collisions(indices, curr_pts, centers, start_node_idx, penalty_base=500000.0, penalty_slope=500000.0)
         curr_cost = t_len + c_cost
         best_indices = list(indices)
         best_h, best_p, best_r = np.array(headings), np.array(phi_angles), np.array(radii)
         best_cost = curr_cost
+        best_col = c_col
         
-        temp = 200.0
+        # 4. Strict Collision-First SA
+        temp = 100.0
         for step in range(max_iter):
             t_curr = temp * (cooling_rate ** step)
-            new_idx = list(indices)
-            new_p, new_r = np.array(phi_angles), np.array(radii)
+            new_p, new_r = np.array(best_p), np.array(best_r)
             
-            r_val = random.random()
-            if r_val < 0.15 and n >= 4:
-                idx1, idx2 = random.sample(range(1, n), 2)
-                if idx1 > idx2: idx1, idx2 = idx2, idx1
-                new_idx = indices[:idx1] + indices[idx1:idx2+1][::-1] + indices[idx2+1:]
-            elif r_val < 0.70:
-                t_i = random.randint(0, n - 1)
-                if t_i != start_node_idx:
+            t_i = random.randint(0, n - 1)
+            if t_i != start_node_idx:
+                if random.random() < 0.70:
                     new_p[t_i] = (new_p[t_i] + np.random.normal(0, np.radians(20))) % (2 * np.pi)
-            else:
-                t_i = random.randint(0, n - 1)
-                if t_i != start_node_idx:
-                    new_r[t_i] = np.clip(new_r[t_i] + np.random.normal(0, 0.4), self.obs_min_radius, self.obs_max_radius)
+                else:
+                    new_r[t_i] = np.clip(new_r[t_i] + np.random.normal(0, 0.4), 6.5, 8.8)
                     
-            new_h = self.compute_tangents(new_idx, new_p, new_r, centers, start_node_idx)
+            new_h = self.compute_tangents(indices, new_p, new_r, centers, start_node_idx)
             trial_pts = get_points(new_h, new_p, new_r)
-            t_len, c_cost, c_col = self.calc_cost_and_collisions(new_idx, trial_pts, centers, start_node_idx, penalty_base=200000.0, penalty_slope=200000.0)
-            trial_cost = t_len + c_cost
+            t_len, c_cost, c_col = self.calc_cost_and_collisions(indices, trial_pts, centers, start_node_idx, penalty_base=500000.0, penalty_slope=500000.0)
             
+            if best_col == 0 and c_col > 0:
+                continue
+            trial_cost = t_len + c_cost
             delta = trial_cost - curr_cost
             if delta < 0 or (t_curr > 0 and random.random() < np.exp(-delta / t_curr)):
-                indices, headings, phi_angles, radii = new_idx, new_h, new_p, new_r
+                headings, phi_angles, radii = new_h, new_p, new_r
                 curr_cost = trial_cost
-                if curr_cost < best_cost:
-                    best_indices = list(indices)
+                if (c_col < best_col) or (c_col == best_col and trial_cost < best_cost):
                     best_h, best_p, best_r = np.array(headings), np.array(phi_angles), np.array(radii)
-                    best_cost = curr_cost
+                    best_cost = trial_cost
+                    best_col = c_col
                     
         final_pts = get_points(best_h, best_p, best_r)
         
-        # 3. DETERMINISTIC COLLISION ERASER
-        for pass_round in range(5):
+        # 5. Advanced Collision Eraser (Dense Radial + Extended Heading + Joint Flank Search)
+        for pass_round in range(8):
             has_col = False
             for i in range(n):
                 u = best_indices[i]
                 v = best_indices[(i + 1) % n]
-                hit, _, _ = self.check_segment_collision(final_pts[u], final_pts[v], centers, start_node_idx, safe_r=5.05)
+                hit, _, _ = self.check_segment_collision(final_pts[u], final_pts[v], centers, start_node_idx, safe_r=5.12)
                 if hit:
                     has_col = True
+                    repaired = False
+                    
+                    # Pass 1: Single Node Optimization on v then u
                     for fix_target in [v, u]:
                         if fix_target == start_node_idx: continue
                         pos = best_indices.index(fix_target)
@@ -689,24 +730,101 @@ class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
                         best_candidate = None
                         best_cand_len = 1e9
                         
+                        # Test angles (36 uniform) and expanded radii (up to 8.8 km)
                         for phi in np.linspace(0, 2*np.pi, 36, endpoint=False):
-                            for r in [6.5, 7.5, 8.5]:
+                            for r in [6.8, 7.5, 8.2, 8.8]:
                                 cand_xy = c + r * np.array([np.cos(phi), np.sin(phi)])
-                                for sign in [1.0, -1.0]:
-                                    tang = np.array([-np.sin(phi), np.cos(phi)]) * sign
-                                    h = np.arctan2(tang[1], tang[0])
+                                # Distance to other obstacles
+                                if any(np.linalg.norm(cand_xy - centers[o]) < 5.25 for o in range(n) if o != fix_target and o != start_node_idx):
+                                    continue
+                                    
+                                v_next = final_pts[next_n][:2] - cand_xy
+                                v_prev = cand_xy - final_pts[prev_n][:2]
+                                d_next = v_next / (np.linalg.norm(v_next) + 1e-6)
+                                d_prev = v_prev / (np.linalg.norm(v_prev) + 1e-6)
+                                d_avg = d_next + d_prev
+                                d_avg /= (np.linalg.norm(d_avg) + 1e-6)
+                                
+                                base_headings = [
+                                    np.arctan2(d_next[1], d_next[0]),
+                                    np.arctan2(d_prev[1], d_prev[0]),
+                                    np.arctan2(d_avg[1], d_avg[0]),
+                                    phi + np.pi/2, phi - np.pi/2, phi
+                                ]
+                                test_headings = []
+                                for bh in base_headings:
+                                    test_headings.extend([bh, bh - 0.20, bh + 0.20])
+                                    
+                                for h in test_headings:
                                     cand_p = np.array([cand_xy[0], cand_xy[1], h])
+                                    hit_in, l_in, _ = self.check_segment_collision(final_pts[prev_n], cand_p, centers, start_node_idx, safe_r=5.08)
+                                    if hit_in: continue
+                                    hit_out, l_out, _ = self.check_segment_collision(cand_p, final_pts[next_n], centers, start_node_idx, safe_r=5.08)
+                                    if hit_out: continue
                                     
-                                    hit_in, l_in, _ = self.check_segment_collision(final_pts[prev_n], cand_p, centers, start_node_idx, safe_r=5.05)
-                                    hit_out, l_out, _ = self.check_segment_collision(cand_p, final_pts[next_n], centers, start_node_idx, safe_r=5.05)
-                                    
-                                    if not hit_in and not hit_out:
-                                        if l_in + l_out < best_cand_len:
-                                            best_cand_len = l_in + l_out
-                                            best_candidate = cand_p
+                                    if l_in + l_out < best_cand_len:
+                                        best_cand_len = l_in + l_out
+                                        best_candidate = cand_p
+                                        
                         if best_candidate is not None:
                             final_pts[fix_target] = best_candidate
+                            repaired = True
                             break
+                            
+                    # Pass 2: Joint Pair Optimization if single fix fails
+                    if not repaired and u != start_node_idx and v != start_node_idx:
+                        pos_u = best_indices.index(u)
+                        pos_v = best_indices.index(v)
+                        prev_u = best_indices[(pos_u - 1) % n]
+                        next_v = best_indices[(pos_v + 1) % n]
+                        cu, cv = centers[u], centers[v]
+                        
+                        best_pair = None
+                        best_pair_len = 1e9
+                        
+                        # Test both standard and wide radii
+                        for r_pair in [7.5, 8.5, 8.8]:
+                            for phi_u in np.linspace(0, 2*np.pi, 20, endpoint=False):
+                                for phi_v in np.linspace(0, 2*np.pi, 20, endpoint=False):
+                                    xy_u = cu + r_pair * np.array([np.cos(phi_u), np.sin(phi_u)])
+                                    xy_v = cv + r_pair * np.array([np.cos(phi_v), np.sin(phi_v)])
+                                    
+                                    if any(np.linalg.norm(xy_u - centers[o]) < 5.25 for o in range(n) if o != u and o != start_node_idx):
+                                        continue
+                                    if any(np.linalg.norm(xy_v - centers[o]) < 5.25 for o in range(n) if o != v and o != start_node_idx):
+                                        continue
+                                        
+                                    v_in_u = xy_u - final_pts[prev_u][:2]
+                                    v_uv = xy_v - xy_u
+                                    v_out_v = final_pts[next_v][:2] - xy_v
+                                    
+                                    t_u = v_in_u / np.linalg.norm(v_in_u) + v_uv / np.linalg.norm(v_uv)
+                                    t_v = v_uv / np.linalg.norm(v_uv) + v_out_v / np.linalg.norm(v_out_v)
+                                    th_chord = np.arctan2(v_uv[1], v_uv[0])
+                                    
+                                    for hu in [np.arctan2(t_u[1], t_u[0]), th_chord]:
+                                        for hv in [np.arctan2(t_v[1], t_v[0]), th_chord]:
+                                            cand_u = np.array([xy_u[0], xy_u[1], hu])
+                                            cand_v = np.array([xy_v[0], xy_v[1], hv])
+                                            
+                                            h1, l1, _ = self.check_segment_collision(final_pts[prev_u], cand_u, centers, start_node_idx, safe_r=5.05)
+                                            if h1: continue
+                                            h2, l2, _ = self.check_segment_collision(cand_u, cand_v, centers, start_node_idx, safe_r=5.05)
+                                            if h2: continue
+                                            h3, l3, _ = self.check_segment_collision(cand_v, final_pts[next_v], centers, start_node_idx, safe_r=5.05)
+                                            if h3: continue
+                                            
+                                            if l1 + l2 + l3 < best_pair_len:
+                                                best_pair_len = l1 + l2 + l3
+                                                best_pair = (cand_u, cand_v)
+                                                break
+                                        if best_pair is not None: break
+                                    if best_pair is not None: break
+                                if best_pair is not None: break
+                            if best_pair is not None: break
+                            
+                        if best_pair is not None:
+                            final_pts[u], final_pts[v] = best_pair
             if not has_col: break
             
         final_len = 0.0
