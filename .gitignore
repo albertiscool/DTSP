@@ -35,3 +35,4 @@ ENV/
 # Temporary
 TMP/
 *.log
+transformer_checkpoints/checkpoint_latest.pt
