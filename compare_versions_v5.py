@@ -937,23 +937,27 @@ class Version5_ZeroCollisionFast(Version3_TangentSmoothing):
         return repairs
         return tour
 
-    def solve(self, centers, start_node_idx, max_iter=600, cooling_rate=0.995):
+    def solve(self, centers, start_node_idx, max_iter=600, cooling_rate=0.995, initial_indices=None):
         n = len(centers)
-        coords = np.zeros((n, 2), dtype=np.float32)
-        coords[:, 0] = (centers[:, 0] - 50.0) / 100.0
-        coords[:, 1] = (centers[:, 1] - 0.0) / 100.0
-        obs_radii = np.ones(n, dtype=np.float32) * (self.obs_max_radius / 100.0)
-        obs_radii[start_node_idx] = 0.0
-        coords_t = torch.tensor(coords, device=self.device).unsqueeze(0)
-        obs_radii_t = torch.tensor(obs_radii, device=self.device).unsqueeze(0)
         
-        # 1. Transformer Policy Tour
-        with torch.no_grad():
-            tours, _ = self.policy(coords_t, obs_radii_t, greedy=True, start_city=start_node_idx)
-            raw_indices = tours[0].cpu().numpy().tolist()
+        # 1. Transformer Policy Tour or Initial Indices
+        if initial_indices is not None:
+            indices = list(initial_indices)
+        else:
+            coords = np.zeros((n, 2), dtype=np.float32)
+            coords[:, 0] = (centers[:, 0] - 50.0) / 100.0
+            coords[:, 1] = (centers[:, 1] - 0.0) / 100.0
+            obs_radii = np.ones(n, dtype=np.float32) * (self.obs_max_radius / 100.0)
+            obs_radii[start_node_idx] = 0.0
+            coords_t = torch.tensor(coords, device=self.device).unsqueeze(0)
+            obs_radii_t = torch.tensor(obs_radii, device=self.device).unsqueeze(0)
             
-        # 2. Obstacle-Aware 2-Opt Untangling
-        indices = self.build_obstacle_aware_tour(raw_indices, centers, start_node_idx)
+            with torch.no_grad():
+                tours, _ = self.policy(coords_t, obs_radii_t, greedy=True, start_city=start_node_idx)
+                raw_indices = tours[0].cpu().numpy().tolist()
+                
+            # 2. Obstacle-Aware 2-Opt Untangling
+            indices = self.build_obstacle_aware_tour(raw_indices, centers, start_node_idx)
                 
         # 3. Cluster-Aware Outward Initial Placement
         phi_angles = np.zeros(n)
